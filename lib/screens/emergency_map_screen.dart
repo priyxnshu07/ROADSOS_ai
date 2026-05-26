@@ -1,11 +1,15 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart' as gmaps;
+import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
+
+import '../models/emergency_location.dart';
+import '../services/emergency_service.dart';
 import '../utils/constants.dart';
 import '../widgets/emergency_card.dart';
-import '../services/emergency_service.dart';
-import '../models/emergency_location.dart';
 
 class EmergencyMapScreen extends StatefulWidget {
   const EmergencyMapScreen({super.key});
@@ -15,9 +19,11 @@ class EmergencyMapScreen extends StatefulWidget {
 }
 
 class _EmergencyMapScreenState extends State<EmergencyMapScreen> {
-  GoogleMapController? _mapController;
+  gmaps.GoogleMapController? _mapController;
+  final MapController _webMapController = MapController();
   Position? _currentPosition;
-  Set<Marker> _markers = {};
+  Set<gmaps.Marker> _googleMarkers = {};
+  List<Marker> _webMarkers = [];
   List<EmergencyLocation> _nearbyServices = [];
   bool _isLoading = true;
 
@@ -29,68 +35,150 @@ class _EmergencyMapScreenState extends State<EmergencyMapScreen> {
 
   Future<void> _loadEmergencyData() async {
     try {
-      // 1. Get User Location
-      final position = await Geolocator.getCurrentPosition();
-      setState(() => _currentPosition = position);
-
-      // 2. Fetch Nearby Services
-      final emergencyService = EmergencyService();
-      final hospitals = await emergencyService.findNearbyHospitals(position.latitude, position.longitude);
-      final police = await emergencyService.findNearbyPolice(position.latitude, position.longitude);
-
-      final allServices = [...hospitals, ...police];
-      
-      // 3. Create Markers
-      final markers = allServices.map((loc) {
-        return Marker(
-          markerId: MarkerId(loc.name),
-          position: LatLng(loc.lat, loc.lng),
-          infoWindow: InfoWindow(title: loc.name, snippet: loc.address),
-          icon: BitmapDescriptor.defaultMarkerWithHue(
-            loc.type == 'hospital' ? BitmapDescriptor.hueAzure : BitmapDescriptor.hueBlue
-          ),
-        );
-      }).toSet();
-
-      // Add user marker
-      markers.add(Marker(
-        markerId: const MarkerId('user_loc'),
-        position: LatLng(position.latitude, position.longitude),
-        infoWindow: const InfoWindow(title: 'Your Location'),
-        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
-      ));
-
-      if (mounted) {
-        setState(() {
-          _nearbyServices = allServices;
-          _markers = markers;
-          _isLoading = false;
-        });
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
       }
+      if (permission == LocationPermission.deniedForever ||
+          permission == LocationPermission.denied) {
+        throw Exception('Location permission denied');
+      }
+
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        throw Exception('Location services disabled');
+      }
+
+      final position = await Geolocator.getCurrentPosition();
+      await _loadServicesAt(position);
     } catch (e) {
-      if (mounted) {
-        setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error loading emergency services: $e')),
-        );
+      if (!mounted) return;
+      // Fall back to default (New Delhi) so the map and list still work on web.
+      final fallback = Position(
+        latitude: 28.6139,
+        longitude: 77.2090,
+        timestamp: DateTime.now(),
+        accuracy: 0,
+        altitude: 0,
+        altitudeAccuracy: 0,
+        heading: 0,
+        headingAccuracy: 0,
+        speed: 0,
+        speedAccuracy: 0,
+      );
+      try {
+        await _loadServicesAt(fallback);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Using default location: $e')),
+          );
+        }
+      } catch (inner) {
+        if (mounted) {
+          setState(() => _isLoading = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error loading emergency services: $inner')),
+          );
+        }
       }
     }
   }
 
-  void _onCall(String name) async {
-    // Placeholder for actual emergency numbers or place phone numbers
+  Future<void> _loadServicesAt(Position position) async {
+    final emergencyService = EmergencyService();
+    final hospitals =
+        await emergencyService.findNearbyHospitals(position.latitude, position.longitude);
+    final police =
+        await emergencyService.findNearbyPolice(position.latitude, position.longitude);
+    final allServices = [...hospitals, ...police];
+
+    if (kIsWeb) {
+      final markers = <Marker>[
+        Marker(
+          point: LatLng(position.latitude, position.longitude),
+          width: 40,
+          height: 40,
+          child: const Icon(Icons.person_pin_circle, color: Colors.red, size: 40),
+        ),
+        ...allServices.map((loc) {
+          return Marker(
+            point: LatLng(loc.lat, loc.lng),
+            width: 36,
+            height: 36,
+            child: Icon(
+              loc.type == 'hospital' ? Icons.local_hospital : Icons.local_police,
+              color: loc.type == 'hospital' ? Colors.blue : Colors.indigo,
+              size: 36,
+            ),
+          );
+        }),
+      ];
+
+      if (mounted) {
+        setState(() {
+          _currentPosition = position;
+          _nearbyServices = allServices;
+          _webMarkers = markers;
+          _isLoading = false;
+        });
+        _webMapController.move(
+          LatLng(position.latitude, position.longitude),
+          14,
+        );
+      }
+      return;
+    }
+
+    final markers = allServices.map((loc) {
+      return gmaps.Marker(
+        markerId: gmaps.MarkerId(loc.name),
+        position: gmaps.LatLng(loc.lat, loc.lng),
+        infoWindow: gmaps.InfoWindow(title: loc.name, snippet: loc.address),
+        icon: gmaps.BitmapDescriptor.defaultMarkerWithHue(
+          loc.type == 'hospital' ? gmaps.BitmapDescriptor.hueAzure : gmaps.BitmapDescriptor.hueBlue,
+        ),
+      );
+    }).toSet();
+
+    markers.add(
+      gmaps.Marker(
+        markerId: const gmaps.MarkerId('user_loc'),
+        position: gmaps.LatLng(position.latitude, position.longitude),
+        infoWindow: const gmaps.InfoWindow(title: 'Your Location'),
+        icon: gmaps.BitmapDescriptor.defaultMarkerWithHue(gmaps.BitmapDescriptor.hueRed),
+      ),
+    );
+
+    if (mounted) {
+      setState(() {
+        _currentPosition = position;
+        _nearbyServices = allServices;
+        _googleMarkers = markers;
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _onCall(String name) async {
     final Uri url = Uri.parse('tel:102');
     if (await canLaunchUrl(url)) {
       await launchUrl(url);
     }
   }
 
-  void _onNavigate(double lat, double lng) async {
+  Future<void> _onNavigate(double lat, double lng) async {
+    final googleMapsUrl = Uri.parse(
+      'https://www.google.com/maps/dir/?api=1&destination=$lat,$lng',
+    );
+    if (kIsWeb) {
+      await launchUrl(googleMapsUrl, webOnlyWindowName: '_blank');
+      return;
+    }
+
     final Uri url = Uri.parse('google.navigation:q=$lat,$lng');
     if (await canLaunchUrl(url)) {
       await launchUrl(url);
     } else {
-      // Fallback for iOS
       final appleUrl = Uri.parse('http://maps.apple.com/?daddr=$lat,$lng');
       if (await canLaunchUrl(appleUrl)) {
         await launchUrl(appleUrl);
@@ -98,25 +186,50 @@ class _EmergencyMapScreenState extends State<EmergencyMapScreen> {
     }
   }
 
+  Widget _buildMapLayer() {
+    final lat = _currentPosition!.latitude;
+    final lng = _currentPosition!.longitude;
+
+    if (kIsWeb) {
+      return FlutterMap(
+        mapController: _webMapController,
+        options: MapOptions(
+          initialCenter: LatLng(lat, lng),
+          initialZoom: 14,
+          interactionOptions: const InteractionOptions(
+            flags: InteractiveFlag.all,
+          ),
+        ),
+        children: [
+          TileLayer(
+            urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+            userAgentPackageName: 'com.roadsos.roadsos_ai',
+          ),
+          MarkerLayer(markers: _webMarkers),
+        ],
+      );
+    }
+
+    return gmaps.GoogleMap(
+      initialCameraPosition: gmaps.CameraPosition(
+        target: gmaps.LatLng(lat, lng),
+        zoom: 14,
+      ),
+      markers: _googleMarkers,
+      myLocationEnabled: true,
+      onMapCreated: (controller) => _mapController = controller,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Emergency Services')),
-      body: _isLoading
+      body: _isLoading || _currentPosition == null
           ? const Center(child: CircularProgressIndicator())
           : Stack(
               children: [
-                GoogleMap(
-                  initialCameraPosition: CameraPosition(
-                    target: LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
-                    zoom: 14,
-                  ),
-                  markers: _markers,
-                  myLocationEnabled: true,
-                  onMapCreated: (controller) => _mapController = controller,
-                ),
-                
-                // SOS ALERT Fixed Button
+                _buildMapLayer(),
                 Positioned(
                   top: 16,
                   left: 16,
@@ -133,13 +246,18 @@ class _EmergencyMapScreenState extends State<EmergencyMapScreen> {
                       children: [
                         Icon(Icons.sos, color: Colors.white, size: 30),
                         SizedBox(width: 8),
-                        Text('SEND SOS ALERT', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                        Text(
+                          'SEND SOS ALERT',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                       ],
                     ),
                   ),
                 ),
-                
-                // Bottom Sheet List
                 DraggableScrollableSheet(
                   initialChildSize: 0.3,
                   minChildSize: 0.1,
@@ -154,7 +272,9 @@ class _EmergencyMapScreenState extends State<EmergencyMapScreen> {
                       child: ListView.builder(
                         controller: scrollController,
                         padding: const EdgeInsets.all(16),
-                        itemCount: _nearbyServices.length + 2,
+                        itemCount: _nearbyServices.isEmpty
+                            ? 3
+                            : _nearbyServices.length + 2,
                         itemBuilder: (context, index) {
                           if (index == 0) {
                             return Center(
@@ -162,7 +282,10 @@ class _EmergencyMapScreenState extends State<EmergencyMapScreen> {
                                 width: 40,
                                 height: 5,
                                 margin: const EdgeInsets.only(bottom: 16),
-                                decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(10)),
+                                decoration: BoxDecoration(
+                                  color: Colors.grey[300],
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
                               ),
                             );
                           }
@@ -172,7 +295,16 @@ class _EmergencyMapScreenState extends State<EmergencyMapScreen> {
                               child: Text('NEARBY SERVICES', style: AppTextStyles.subHeading),
                             );
                           }
-                          
+                          if (_nearbyServices.isEmpty) {
+                            return const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 24),
+                              child: Text(
+                                'No nearby services found. Try again in a moment.',
+                                textAlign: TextAlign.center,
+                              ),
+                            );
+                          }
+
                           final service = _nearbyServices[index - 2];
                           return EmergencyCard(
                             title: service.name,

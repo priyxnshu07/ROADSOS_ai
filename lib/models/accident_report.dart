@@ -1,9 +1,12 @@
+import 'dart:typed_data';
+
 import 'package:cross_file/cross_file.dart';
 
 enum Severity { minor, moderate, critical }
 
 class AccidentReport {
   final XFile? image;
+  final Uint8List? imageBytes;
   final String? description;
   final String locationName;
   final double latitude;
@@ -14,6 +17,7 @@ class AccidentReport {
 
   AccidentReport({
     this.image,
+    this.imageBytes,
     this.description,
     required this.locationName,
     required this.latitude,
@@ -30,6 +34,7 @@ class AccidentReport {
   }) {
     return AccidentReport(
       image: image,
+      imageBytes: imageBytes,
       description: description,
       locationName: locationName,
       latitude: latitude,

@@ -1,50 +1,84 @@
-import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:cross_file/cross_file.dart';
 import '../utils/constants.dart';
 import '../models/accident_report.dart';
 import '../services/gemini_service.dart';
 import 'severity_result_screen.dart';
-
 class ReportAccidentScreen extends StatefulWidget {
-  const ReportAccidentScreen({super.key});
+  const ReportAccidentScreen({Key? key}) : super(key: key);
 
   @override
   State<ReportAccidentScreen> createState() => _ReportAccidentScreenState();
 }
 
 class _ReportAccidentScreenState extends State<ReportAccidentScreen> {
-  XFile? _image;
-  final _descriptionController = TextEditingController();
-  final _picker = ImagePicker();
+  Position? _currentPosition;
   bool _isLoading = false;
+  XFile? _image;
+  Uint8List? _imageBytes;
+  final _descriptionController = TextEditingController();
+  final ImagePicker _picker = ImagePicker();
+
+
+  @override
+  void initState() {
+    super.initState();
+    _determinePosition();
+  }
+
+  Future<void> _determinePosition() async {
+    try {
+      final position = await Geolocator.getCurrentPosition();
+      setState(() {
+        _currentPosition = position;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unable to get location. Using default.')),
+      );
+    }
+  }
 
   Future<void> _pickImage(ImageSource source) async {
-    final pickedFile = await _picker.pickImage(source: source);
-    if (pickedFile != null) {
+    try {
+      final pickedFile = await _picker.pickImage(source: source);
+      if (pickedFile == null) return;
+
+      final bytes = await pickedFile.readAsBytes();
+      if (!mounted) return;
       setState(() {
         _image = pickedFile;
+        _imageBytes = bytes;
       });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not load image: $e')),
+      );
     }
   }
 
   void _submitReport() async {
-    if (_image == null) {
+    if (_imageBytes == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please take or select a photo of the accident.')),
       );
       return;
     }
 
-    setState(() => _isLoading = true);
+    setState(() {
+      _isLoading = true;
+    });
 
     try {
       final geminiService = GeminiService();
-      final bytes = await _image!.readAsBytes();
-      
       final result = await geminiService.analyzeSeverity(
-        imageBytes: bytes,
+        imageBytes: _imageBytes!,
         description: _descriptionController.text,
       );
 
@@ -56,28 +90,30 @@ class _ReportAccidentScreenState extends State<ReportAccidentScreen> {
         case 'MODERATE':
           severity = Severity.moderate;
           break;
-        case 'MINOR':
         default:
           severity = Severity.minor;
-          break;
       }
 
-      // Fetch AI guidance based on severity
       final guidance = await geminiService.getEmergencyGuidance(result['severity']);
 
       final report = AccidentReport(
         image: _image,
+        imageBytes: _imageBytes,
         description: _descriptionController.text,
-        locationName: "New Delhi, Connaught Place",
-        latitude: 28.6139,
-        longitude: 77.2090,
+        locationName: _currentPosition != null
+            ? "Lat: ${_currentPosition!.latitude}, Lng: ${_currentPosition!.longitude}"
+            : "Location unavailable",
+        latitude: _currentPosition?.latitude ?? 28.6139,
+        longitude: _currentPosition?.longitude ?? 77.2090,
         severity: severity,
         aiSummary: result['injuries_likely'] ?? result['summary'],
         recommendations: guidance,
       );
 
       if (mounted) {
-        setState(() => _isLoading = false);
+        setState(() {
+          _isLoading = false;
+        });
         Navigator.push(
           context,
           MaterialPageRoute(
@@ -87,7 +123,9 @@ class _ReportAccidentScreenState extends State<ReportAccidentScreen> {
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _isLoading = false);
+        setState(() {
+          _isLoading = false;
+        });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Error analyzing accident: $e')),
         );
@@ -123,20 +161,21 @@ class _ReportAccidentScreenState extends State<ReportAccidentScreen> {
                       borderRadius: BorderRadius.circular(15),
                       border: Border.all(color: Colors.grey[300]!),
                     ),
-                    child: _image == null
+                    child: _imageBytes == null
                         ? Row(
                             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                             children: [
-                              Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  IconButton(
-                                    icon: const Icon(Icons.camera_alt, size: 50, color: AppColors.primaryRed),
-                                    onPressed: () => _pickImage(ImageSource.camera),
-                                  ),
-                                  const Text('Camera'),
-                                ],
-                              ),
+                              if (!kIsWeb)
+                                Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    IconButton(
+                                      icon: const Icon(Icons.camera_alt, size: 50, color: AppColors.primaryRed),
+                                      onPressed: () => _pickImage(ImageSource.camera),
+                                    ),
+                                    const Text('Camera'),
+                                  ],
+                                ),
                               Column(
                                 mainAxisAlignment: MainAxisAlignment.center,
                                 children: [
@@ -144,19 +183,28 @@ class _ReportAccidentScreenState extends State<ReportAccidentScreen> {
                                     icon: const Icon(Icons.photo_library, size: 50, color: Colors.blue),
                                     onPressed: () => _pickImage(ImageSource.gallery),
                                   ),
-                                  const Text('Gallery'),
+                                  Text(kIsWeb ? 'Choose Photo' : 'Gallery'),
                                 ],
                               ),
                             ],
                           )
                         : ClipRRect(
                             borderRadius: BorderRadius.circular(15),
-                            child: Image.network(_image!.path, fit: BoxFit.cover),
+                            child: Image.memory(
+                              _imageBytes!,
+                              fit: BoxFit.cover,
+                              width: double.infinity,
+                              height: 200,
+                              gaplessPlayback: true,
+                            ),
                           ),
                   ),
-                  if (_image != null)
+                  if (_imageBytes != null)
                     TextButton.icon(
-                      onPressed: () => setState(() => _image = null),
+                      onPressed: () => setState(() {
+                        _image = null;
+                        _imageBytes = null;
+                      }),
                       icon: const Icon(Icons.refresh),
                       label: const Text('Change Photo'),
                     ),

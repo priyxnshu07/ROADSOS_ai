@@ -20,7 +20,7 @@ class SeverityResultScreen extends StatelessWidget {
         child: Column(
           children: [
             // Image Preview
-            if (report.image != null)
+            if (report.imageBytes != null)
               Container(
                 height: 150,
                 width: 150,
@@ -30,7 +30,7 @@ class SeverityResultScreen extends StatelessWidget {
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(15),
-                  child: Image.network(report.image!.path, fit: BoxFit.cover),
+                  child: Image.memory(report.imageBytes!, fit: BoxFit.cover),
                 ),
               ),
             const SizedBox(height: 24),
