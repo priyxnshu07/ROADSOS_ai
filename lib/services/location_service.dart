@@ -21,10 +21,25 @@ class LocationService {
     }
     
     if (permission == LocationPermission.deniedForever) {
-      return Future.error('Location permissions are permanently denied, we cannot request permissions.');
+      return Future.error('Location permissions are permanently denied.');
     } 
 
-    return await Geolocator.getCurrentPosition();
+    // ADDED: Try for high accuracy with a strict timeout, then fall back to last known or lower accuracy
+    try {
+      return await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 8),
+      );
+    } catch (e) {
+      // Fallback: Try lower accuracy/cached location
+      final lastKnown = await Geolocator.getLastKnownPosition();
+      if (lastKnown != null) return lastKnown;
+      
+      return await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.low,
+        timeLimit: const Duration(seconds: 5),
+      );
+    }
   }
 
   Future<String> getAreaName(double lat, double lon) async {
@@ -36,12 +51,19 @@ class LocationService {
       'zoom': '18',
       'addressdetails': '1',
     });
-    final response = await http.get(url, headers: {'User-Agent': 'RoadSOS-AI/1.0'});
-    if (response.statusCode == 200) {
-      final data = jsonDecode(response.body);
-      return data['display_name'] ?? '${lat.toStringAsFixed(4)}, ${lon.toStringAsFixed(4)}';
+
+    try {
+      final response = await http.get(url, headers: {
+        'User-Agent': 'RoadSOS-AI/1.0',
+      }).timeout(const Duration(seconds: 4)); // ADDED: Strict timeout for network call
+      
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['display_name'] ?? '${lat.toStringAsFixed(4)}, ${lon.toStringAsFixed(4)}';
+      }
+    } catch (_) {
+      // Fallback to coordinates immediately on timeout or error
     }
-    // Fallback to coordinates if request fails
     return '${lat.toStringAsFixed(4)}, ${lon.toStringAsFixed(4)}';
   }
 }

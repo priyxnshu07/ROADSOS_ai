@@ -4,6 +4,8 @@ class EmergencyLocation {
   final double lng;
   final String address;
   final String type; // 'hospital' or 'police'
+  final String? phoneNumber;
+  final double? distance; // Added distance in KM
 
   EmergencyLocation({
     required this.name,
@@ -11,5 +13,7 @@ class EmergencyLocation {
     required this.lng,
     required this.address,
     required this.type,
+    this.phoneNumber,
+    this.distance,
   });
 }
